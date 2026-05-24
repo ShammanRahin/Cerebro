@@ -1,6 +1,45 @@
+# Python virtual environments
+venv/
 .venv/
+env/
+
+# Python cache
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables
 .env
-credentials.json
-token.json
-.claude
+
+# SQLite database
+*.db
+*.sqlite3
+
+# Logs
+*.log
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Node modules
+frontend/node_modules/
+
+# Build outputs
+frontend/dist/
+
+# Coverage
+coverage/
+htmlcov/
+
+# Pytest
+.pytest_cache/
+
+# Mypy
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
