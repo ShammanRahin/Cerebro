@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-cerebro-bg text-gray-100 font-sans antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    @apply w-1.5;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-cerebro-bg;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-cerebro-border rounded-full;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-cerebro-accent hover:bg-cerebro-accent-hover text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply text-gray-400 hover:text-white hover:bg-cerebro-border px-3 py-2 rounded-lg text-sm transition-colors;
+  }
+
+  .card {
+    @apply bg-cerebro-surface border border-cerebro-border rounded-xl p-4;
+  }
+
+  .badge-correct {
+    @apply inline-flex items-center gap-1 bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-wrong {
+    @apply inline-flex items-center gap-1 bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-review {
+    @apply inline-flex items-center gap-1 bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  /* Paper backgrounds for canvas */
+  .canvas-paper-dots {
+    background-image: radial-gradient(circle, #c8c8d8 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  .canvas-paper-lines {
+    background-image: repeating-linear-gradient(
+      transparent,
+      transparent 31px,
+      #dde1f0 31px,
+      #dde1f0 32px
+    );
+    background-size: 100% 32px;
+  }
+
+  /* Dark canvas paper */
+  .dark .canvas-paper-dots {
+    background-image: radial-gradient(circle, #3a3a5a 1px, transparent 1px);
+  }
+
+  .dark .canvas-paper-lines {
+    background-image: repeating-linear-gradient(
+      transparent,
+      transparent 31px,
+      #2a2a4a 31px,
+      #2a2a4a 32px
+    );
+  }
+}
