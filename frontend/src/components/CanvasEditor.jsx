@@ -1,9 +1,8 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { fabric } from 'fabric'
-import { getPage, savePage, addPage, listPages, createSession, getRandomProblem } from '../lib/api'
+import { getPage, savePage, addPage, listPages, createSession, getRandomProblem, ocrImage, submitStep } from '../lib/api'
 import { useInkStrokes } from '../hooks/useInkStrokes'
 import { useStepBoundary } from '../hooks/useStepBoundary'
-import StepVerifier from './StepVerifier'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TOOL = { PEN: 'pen', HIGHLIGHTER: 'highlighter', ERASER: 'eraser', SELECT: 'select' }
@@ -58,26 +57,65 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
   const [darkCanvas,  setDarkCanvas]  = useState(false)
   const [editingName, setEditingName] = useState(false)
 
-  // ── Phase 2: OCR + step verification state ───────────────────────────────
-  const [verifierSnap, setVerifierSnap] = useState(null)  // {dataUrl, strokes}
-  const [sessionId,    setSessionId]    = useState(null)
-  const [stepIndex,    setStepIndex]    = useState(0)
-  const [stepHistory,  setStepHistory]  = useState([])    // submitted steps for this page
-  const [showSteps,    setShowSteps]    = useState(false)
+  // ── Phase 2/3: auto-verification state ───────────────────────────────────
+  const [sessionId,   setSessionId]   = useState(null)
+  const [stepIndex,   setStepIndex]   = useState(0)
+  const [stepHistory, setStepHistory] = useState([])
+  const [showSteps,   setShowSteps]   = useState(false)
+  const [checking,    setChecking]    = useState(false)  // OCR+verify in flight
+  const [toast,       setToast]       = useState(null)   // auto-dismiss verdict
 
   const { attach: attachInk, getStrokes, clearStrokes } = useInkStrokes()
 
-  const handleStepReady = useCallback((trigger) => {
+  // Fully automatic: snapshot → OCR → verify → toast (no user interaction)
+  const handleStepReady = useCallback(async (_trigger) => {
     const canvas = fabricRef.current
-    if (!canvas) return
+    if (!canvas || checking) return
     const strokes = getStrokes()
     if (strokes.length === 0) return
-    // Crop to bounding box of strokes for a tight snapshot
+
     const dataUrl = canvas.toDataURL({ format: 'png', quality: 0.92, multiplier: 1.5 })
-    setVerifierSnap({ dataUrl, strokes: [...strokes] })
-  }, [getStrokes])
+    setChecking(true)
+    setToast(null)
+
+    try {
+      // 1. OCR
+      let text = ''
+      try {
+        const { text: t } = await ocrImage(dataUrl)
+        text = t ?? ''
+      } catch { /* OCR failed — skip silently */ }
+
+      if (!text.trim()) return   // blank canvas, nothing to verify
+
+      // 2. Backend verification (SymPy / Claude)
+      if (!sessionId) return
+      const step = await submitStep(sessionId, {
+        session_id:      sessionId,
+        step_index:      stepIndex,
+        recognized_text: text,
+        strokes_json:    strokes.length ? JSON.stringify(strokes) : null,
+      })
+
+      // 3. Record result + clear stroke buffer
+      setStepHistory(prev => [...prev, step])
+      setStepIndex(i => i + 1)
+      clearStrokes()
+      resetBoundary()
+
+      // 4. Show toast for 3.5 s then auto-dismiss
+      setToast(step)
+      setTimeout(() => setToast(null), 3500)
+
+    } catch (err) {
+      console.error('Auto-check failed:', err)
+    } finally {
+      setChecking(false)
+    }
+  }, [checking, getStrokes, sessionId, stepIndex, clearStrokes])
 
   const { attachToCanvas: attachBoundary, triggerNow, resetBoundary } = useStepBoundary(handleStepReady)
+  // eslint-disable-next-line react-hooks/exhaustive-deps — resetBoundary stable ref
 
   // ── Canvas init ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -325,20 +363,6 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
     canvas.renderAll()
     pushHistory()
   }, [darkCanvas, pushHistory])
-
-  // ── Step verifier callbacks ───────────────────────────────────────────────
-  const handleStepSubmitted = useCallback((step) => {
-    setStepHistory(prev => [...prev, step])
-    setStepIndex(i => i + 1)
-    clearStrokes()
-    resetBoundary()
-  }, [clearStrokes, resetBoundary])
-
-  const handleVerifierDismiss = useCallback(() => {
-    setVerifierSnap(null)
-    clearStrokes()
-    resetBoundary()
-  }, [clearStrokes, resetBoundary])
 
   // ── Page nav ──────────────────────────────────────────────────────────────
   const goToPage = async (num) => {
@@ -620,18 +644,43 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
         >
           <canvas ref={canvasElRef} className="absolute inset-0" />
 
-          {/* Step verifier overlay — appears when step boundary fires */}
-          {verifierSnap && !verifierSnap._dismissed && (
-            <StepVerifier
-              sessionId={sessionId}
-              stepIndex={stepIndex}
-              imageDataUrl={verifierSnap.dataUrl}
-              strokes={verifierSnap.strokes}
-              darkCanvas={darkCanvas}
-              onDismiss={handleVerifierDismiss}
-              onSubmitted={handleStepSubmitted}
-            />
+          {/* Checking spinner — shows while OCR+verify is running */}
+          {checking && (
+            <div className={`absolute bottom-16 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-2 rounded-full text-xs font-medium shadow-lg pointer-events-none z-20 ${
+              darkCanvas ? 'bg-gray-800/90 text-gray-300 border border-gray-700' : 'bg-white/90 text-gray-600 border border-gray-200'
+            } backdrop-blur`}>
+              <span className="w-2 h-2 rounded-full bg-cerebro-accent animate-pulse" />
+              Checking your work…
+            </div>
           )}
+
+          {/* Auto-dismiss verdict toast */}
+          {toast && !checking && (() => {
+            const cfg = {
+              correct:      { bg: 'bg-green-500/15 border-green-500/30', icon: '✓', text: 'text-green-400', label: 'Correct' },
+              wrong:        { bg: 'bg-red-500/15 border-red-500/30',     icon: '✗', text: 'text-red-400',   label: 'Wrong'   },
+              needs_review: { bg: 'bg-amber-500/15 border-amber-500/30', icon: '~', text: 'text-amber-400', label: 'Review'  },
+            }[toast.verdict] ?? { bg: 'bg-gray-500/15 border-gray-500/30', icon: '?', text: 'text-gray-400', label: 'Unknown' }
+            return (
+              <div className={`absolute bottom-16 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1 px-5 py-3 rounded-2xl border shadow-xl pointer-events-none z-20 backdrop-blur min-w-48 max-w-xs text-center ${cfg.bg}`}>
+                <div className="flex items-center gap-2">
+                  <span className={`text-lg font-bold ${cfg.text}`}>{cfg.icon}</span>
+                  <span className={`text-sm font-semibold ${cfg.text}`}>{cfg.label}</span>
+                  {toast.confidence != null && (
+                    <span className={`text-xs opacity-70 ${cfg.text}`}>{Math.round(toast.confidence * 100)}%</span>
+                  )}
+                </div>
+                <p className={`text-xs font-mono truncate max-w-full ${darkCanvas ? 'text-gray-300' : 'text-gray-600'}`}>
+                  {toast.recognized_text}
+                </p>
+                {toast.hint && (
+                  <p className={`text-xs italic ${darkCanvas ? 'text-gray-400' : 'text-gray-500'}`}>
+                    💡 {toast.hint}
+                  </p>
+                )}
+              </div>
+            )
+          })()}
 
           {/* Verdict dots — one per submitted step, top-right corner */}
           {stepHistory.length > 0 && (
@@ -678,7 +727,8 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
             {stepHistory.length === 0 ? (
               <div className="flex-1 flex flex-col items-center justify-center text-center p-4">
                 <p className={`text-xs ${darkCanvas ? 'text-gray-500' : 'text-gray-400'}`}>
-                  Write a step, then press Enter or tap "Check step"
+                  Write a step and pause — it checks automatically.
+                  Or press Enter / tap two fingers.
                 </p>
               </div>
             ) : (
