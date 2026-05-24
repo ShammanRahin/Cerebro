@@ -1,6 +1,9 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { fabric } from 'fabric'
-import { getPage, savePage, addPage, listPages } from '../lib/api'
+import { getPage, savePage, addPage, listPages, createSession, getRandomProblem } from '../lib/api'
+import { useInkStrokes } from '../hooks/useInkStrokes'
+import { useStepBoundary } from '../hooks/useStepBoundary'
+import StepVerifier from './StepVerifier'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const TOOL = { PEN: 'pen', HIGHLIGHTER: 'highlighter', ERASER: 'eraser', SELECT: 'select' }
@@ -40,6 +43,7 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
   const historyIdxRef = useRef(-1)
   const pressureRef  = useRef(0.5)
   const isSavingRef  = useRef(false)
+  const isDirtyRef   = useRef(false)
 
   const [tool,        setTool]        = useState(TOOL.PEN)
   const [color,       setColor]       = useState(PALETTE[0].hex)
@@ -50,9 +54,30 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
   const [saved,       setSaved]       = useState(false)
   const [showPages,   setShowPages]   = useState(false)
   const [pageThumbs,  setPageThumbs]  = useState([])
-  const [paperStyle,  setPaperStyle]  = useState('dots') // dots | lines | plain
+  const [paperStyle,  setPaperStyle]  = useState('dots')
   const [darkCanvas,  setDarkCanvas]  = useState(false)
   const [editingName, setEditingName] = useState(false)
+
+  // ── Phase 2: OCR + step verification state ───────────────────────────────
+  const [verifierSnap, setVerifierSnap] = useState(null)  // {dataUrl, strokes}
+  const [sessionId,    setSessionId]    = useState(null)
+  const [stepIndex,    setStepIndex]    = useState(0)
+  const [stepHistory,  setStepHistory]  = useState([])    // submitted steps for this page
+  const [showSteps,    setShowSteps]    = useState(false)
+
+  const { attach: attachInk, getStrokes, clearStrokes } = useInkStrokes()
+
+  const handleStepReady = useCallback((trigger) => {
+    const canvas = fabricRef.current
+    if (!canvas) return
+    const strokes = getStrokes()
+    if (strokes.length === 0) return
+    // Crop to bounding box of strokes for a tight snapshot
+    const dataUrl = canvas.toDataURL({ format: 'png', quality: 0.92, multiplier: 1.5 })
+    setVerifierSnap({ dataUrl, strokes: [...strokes] })
+  }, [getStrokes])
+
+  const { attachToCanvas: attachBoundary, triggerNow, resetBoundary } = useStepBoundary(handleStepReady)
 
   // ── Canvas init ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -103,10 +128,15 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
     upper.addEventListener('pointermove', trackPressure)
 
     // History on path creation
-    canvas.on('path:created', pushHistory)
-    canvas.on('object:modified', pushHistory)
+    const markDirty = () => { isDirtyRef.current = true }
+    canvas.on('path:created', () => { pushHistory(); markDirty() })
+    canvas.on('object:modified', () => { pushHistory(); markDirty() })
 
     fabricRef.current = canvas
+
+    // Attach Phase 2 hooks
+    const detachInk      = attachInk(canvas)
+    const detachBoundary = attachBoundary(canvas, upper)
 
     return () => {
       ro.disconnect()
@@ -115,6 +145,8 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
       upper.removeEventListener('pointermove', trackPressure)
       canvas.off('path:created', pushHistory)
       canvas.off('object:modified', pushHistory)
+      detachInk()
+      detachBoundary()
       canvas.dispose()
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -129,6 +161,20 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
     historyRef.current = h.slice(0, idx + 1).concat(state)
     historyIdxRef.current = historyRef.current.length - 1
   }, [])
+
+  // ── Bootstrap a practice session (needed for step submission) ────────────
+  useEffect(() => {
+    async function startSession() {
+      try {
+        const problem = await getRandomProblem()
+        const session = await createSession(problem.id)
+        setSessionId(session.id)
+      } catch {
+        // no problems seeded — session stays null, submit still works via direct API
+      }
+    }
+    startSession()
+  }, [notebookId])
 
   // ── Tool / color / size → brush ───────────────────────────────────────────
   useEffect(() => {
@@ -235,9 +281,14 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
     }
   }, [notebookId, currentPage])
 
-  // Auto-save every 20s
+  // Auto-save every 60s only when dirty
   useEffect(() => {
-    const t = setInterval(() => save(true), 20000)
+    const t = setInterval(() => {
+      if (isDirtyRef.current) {
+        isDirtyRef.current = false
+        save(true)
+      }
+    }, 60000)
     return () => clearInterval(t)
   }, [save])
 
@@ -275,6 +326,20 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
     pushHistory()
   }, [darkCanvas, pushHistory])
 
+  // ── Step verifier callbacks ───────────────────────────────────────────────
+  const handleStepSubmitted = useCallback((step) => {
+    setStepHistory(prev => [...prev, step])
+    setStepIndex(i => i + 1)
+    clearStrokes()
+    resetBoundary()
+  }, [clearStrokes, resetBoundary])
+
+  const handleVerifierDismiss = useCallback(() => {
+    setVerifierSnap(null)
+    clearStrokes()
+    resetBoundary()
+  }, [clearStrokes, resetBoundary])
+
   // ── Page nav ──────────────────────────────────────────────────────────────
   const goToPage = async (num) => {
     if (num === currentPage) return
@@ -300,6 +365,7 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
       if (e.key === 'h') setTool(TOOL.HIGHLIGHTER)
       if (e.key === 'e') setTool(TOOL.ERASER)
       if (e.key === 'v') setTool(TOOL.SELECT)
+      if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) triggerNow()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -452,6 +518,19 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
           ↓
         </button>
 
+        {/* Check step — manual trigger */}
+        <button
+          title="Check step (Enter / two-finger tap)"
+          onClick={triggerNow}
+          className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium border transition-colors ${
+            darkCanvas
+              ? 'border-cerebro-accent/40 text-cerebro-accent hover:bg-cerebro-accent/10'
+              : 'border-cerebro-accent/40 text-cerebro-accent hover:bg-cerebro-accent/10'
+          }`}
+        >
+          ✦ Check step
+        </button>
+
         {/* Save */}
         <button
           title="Save (Ctrl+S)"
@@ -462,6 +541,22 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
           }`}
         >
           {saving ? 'Saving…' : saved ? '✓ Saved' : '↑ Save'}
+        </button>
+
+        {/* Steps history toggle */}
+        <button
+          onClick={() => setShowSteps(v => !v)}
+          title="Step history"
+          className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold transition-colors ${
+            showSteps ? 'bg-cerebro-accent text-white' : darkCanvas ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-600 hover:bg-gray-100'
+          }`}
+        >
+          ✓
+          {stepHistory.length > 0 && (
+            <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-cerebro-accent text-white text-[9px] flex items-center justify-center font-bold">
+              {stepHistory.length}
+            </span>
+          )}
         </button>
 
         {/* Pages toggle */}
@@ -525,6 +620,29 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
         >
           <canvas ref={canvasElRef} className="absolute inset-0" />
 
+          {/* Step verifier overlay — appears when step boundary fires */}
+          {verifierSnap && !verifierSnap._dismissed && (
+            <StepVerifier
+              sessionId={sessionId}
+              stepIndex={stepIndex}
+              imageDataUrl={verifierSnap.dataUrl}
+              strokes={verifierSnap.strokes}
+              darkCanvas={darkCanvas}
+              onDismiss={handleVerifierDismiss}
+              onSubmitted={handleStepSubmitted}
+            />
+          )}
+
+          {/* Verdict dots — one per submitted step, top-right corner */}
+          {stepHistory.length > 0 && (
+            <div className="absolute top-3 right-3 flex flex-col gap-1 pointer-events-none">
+              {stepHistory.slice(-8).map((s, i) => {
+                const col = s.verdict === 'correct' ? 'bg-green-500' : s.verdict === 'wrong' ? 'bg-red-500' : 'bg-amber-500'
+                return <div key={i} className={`w-2.5 h-2.5 rounded-full ${col} shadow`} title={s.verdict} />
+              })}
+            </div>
+          )}
+
           {/* Page indicator */}
           <div className={`absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-3 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg ${
             darkCanvas ? 'bg-gray-800/80 text-gray-300 backdrop-blur' : 'bg-white/80 text-gray-600 backdrop-blur border border-gray-200'
@@ -545,6 +663,51 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
             </button>
           </div>
         </div>
+
+        {/* Step history side panel */}
+        {showSteps && (
+          <div className={`w-64 flex-shrink-0 flex flex-col border-l overflow-y-auto ${darkCanvas ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+            <div className={`px-3 py-3 border-b flex items-center justify-between ${darkCanvas ? 'border-gray-700' : 'border-gray-100'}`}>
+              <span className={`text-xs font-semibold uppercase tracking-wide ${darkCanvas ? 'text-gray-400' : 'text-gray-500'}`}>
+                Steps ({stepHistory.length})
+              </span>
+              <button onClick={triggerNow} className="text-xs text-cerebro-accent hover:underline">
+                + Check now
+              </button>
+            </div>
+            {stepHistory.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-center p-4">
+                <p className={`text-xs ${darkCanvas ? 'text-gray-500' : 'text-gray-400'}`}>
+                  Write a step, then press Enter or tap "Check step"
+                </p>
+              </div>
+            ) : (
+              <div className="flex-1 p-2 space-y-2">
+                {stepHistory.map((step, i) => {
+                  const dot = step.verdict === 'correct' ? 'bg-green-500' : step.verdict === 'wrong' ? 'bg-red-500' : 'bg-amber-500'
+                  const label = step.verdict === 'correct' ? 'text-green-500' : step.verdict === 'wrong' ? 'text-red-400' : 'text-amber-400'
+                  return (
+                    <div key={step.id ?? i} className={`rounded-lg p-2.5 border ${darkCanvas ? 'bg-gray-700/50 border-gray-600' : 'bg-gray-50 border-gray-100'}`}>
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${dot}`} />
+                        <span className={`text-xs font-medium capitalize ${label}`}>{step.verdict.replace('_', ' ')}</span>
+                        <span className={`ml-auto text-xs ${darkCanvas ? 'text-gray-500' : 'text-gray-400'}`}>#{i + 1}</span>
+                      </div>
+                      <p className={`text-xs leading-relaxed ${darkCanvas ? 'text-gray-300' : 'text-gray-700'}`}>
+                        {step.recognized_text}
+                      </p>
+                      {step.hint && (
+                        <p className={`text-xs mt-1.5 italic ${darkCanvas ? 'text-gray-400' : 'text-gray-500'}`}>
+                          💡 {step.hint}
+                        </p>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

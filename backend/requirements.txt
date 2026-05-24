@@ -12,3 +12,6 @@ sentence-transformers>=2.7.0
 structlog>=24.2.0
 python-multipart>=0.0.9
 aiofiles>=23.2.1
+Pillow>=10.0.0
+paddlepaddle==2.6.2
+paddleocr==2.7.3

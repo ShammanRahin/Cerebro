@@ -34,4 +34,7 @@ export const savePage = (notebookId, pageNum, data) => api.put(`/notebooks/${not
 export const addPage = (notebookId) => api.post(`/notebooks/${notebookId}/pages`).then(r => r.data)
 export const deletePage = (notebookId, pageNum) => api.delete(`/notebooks/${notebookId}/pages/${pageNum}`).then(r => r.data)
 
+// ── OCR ───────────────────────────────────────────────────────────────────────
+export const ocrImage = (image_data) => api.post('/ocr/', { image_data }).then(r => r.data)
+
 export default api

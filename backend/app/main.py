@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import structlog
 
 from app.db import init_db
-from app.routers import mistakes, practice, notes, notebooks
+from app.routers import mistakes, practice, notes, notebooks, ocr
 
 logger = structlog.get_logger()
 
@@ -30,6 +30,7 @@ app.include_router(mistakes.router, prefix="/api/mistakes", tags=["mistakes"])
 app.include_router(practice.router, prefix="/api/practice", tags=["practice"])
 app.include_router(notes.router, prefix="/api/notes", tags=["notes"])
 app.include_router(notebooks.router, prefix="/api/notebooks", tags=["notebooks"])
+app.include_router(ocr.router, prefix="/api/ocr", tags=["ocr"])
 
 
 @app.get("/health")

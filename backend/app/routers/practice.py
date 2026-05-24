@@ -6,6 +6,8 @@ from datetime import datetime
 
 from app.db import get_db
 from app import models, schemas
+from app.agents.step_checker import check_step
+from app.config import settings
 
 router = APIRouter()
 
@@ -72,17 +74,50 @@ def get_session_steps(session_id: int, db: Session = Depends(get_db)):
 
 @router.post("/sessions/{session_id}/steps", response_model=schemas.StepResponse)
 def submit_step(session_id: int, data: schemas.StepSubmit, db: Session = Depends(get_db)):
-    session = db.query(models.PracticeSession).filter(models.PracticeSession.id == session_id).first()
+    # ── 1. Validate session ────────────────────────────────────────────────
+    session = (
+        db.query(models.PracticeSession)
+        .filter(models.PracticeSession.id == session_id)
+        .first()
+    )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # ── 2. Run verification pipeline ──────────────────────────────────────
+    problem_statement = session.problem.statement if session.problem else ""
+    result = check_step(problem_statement, data.recognized_text)
+
+    # ── 3. Auto-log mistake when step is wrong or confidence is low ────────
+    mistake_id = None
+    should_log = (
+        result.verdict == "wrong"
+        or (result.verdict == "needs_review" and result.confidence < settings.confidence_threshold)
+    )
+    if should_log:
+        mistake = models.Mistake(
+            session_id=session_id,
+            problem_id=session.problem_id,
+            recognized_text=data.recognized_text,
+            subject=result.subject,
+            error_type=result.error_type,
+            misconception=result.hint,
+            confidence=result.confidence,
+            strokes_json=data.strokes_json,
+        )
+        db.add(mistake)
+        db.flush()          # get mistake.id before committing
+        mistake_id = mistake.id
+
+    # ── 4. Save step record ───────────────────────────────────────────────
     step = models.StepRecord(
         session_id=session_id,
+        mistake_id=mistake_id,
         step_index=data.step_index,
         recognized_text=data.recognized_text,
-        verdict="needs_review",
-        confidence=None,
-        hint=None,
+        subject=result.subject,
+        verdict=result.verdict,
+        confidence=result.confidence,
+        hint=result.hint,
     )
     db.add(step)
     db.commit()
