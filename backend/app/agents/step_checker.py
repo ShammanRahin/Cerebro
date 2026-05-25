@@ -178,6 +178,81 @@ def _sympy_check(problem_text: str, step_text: str) -> Optional[CheckResult]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SymPy calculus verifier  (definite integrals)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Matches both correct ∫ and the common OCR misread Σ/S with limits
+_INTEGRAL_PATTERNS = [
+    # ∫_a^b expr [dx] = result
+    re.compile(
+        r'[∫∫]\s*[_]?\s*([^\^]+?)\s*\^?\s*([^\s]+)\s+(.+?)\s*(?:d[a-z])?\s*=\s*(.+)$'
+    ),
+    # Σ/S from a to b [of] expr [dx] = result  (OCR misread of ∫)
+    re.compile(
+        r'[ΣS∑]\s*from\s+(\S+)\s+to\s+(\S+)\s+(?:of\s+)?(.+?)\s*(?:d[a-z])?\s*=\s*(.+)$',
+        re.I,
+    ),
+    # integral from a to b [of] expr [dx] = result
+    re.compile(
+        r'integral\s+from\s+(\S+)\s+to\s+(\S+)\s+(?:of\s+)?(.+?)\s*(?:d[a-z])?\s*=\s*(.+)$',
+        re.I,
+    ),
+]
+
+
+def _sympy_integral_check(step_text: str) -> Optional[CheckResult]:
+    """
+    Verify a definite-integral step symbolically.
+    Handles OCR misreads of ∫ as Σ/S.
+    Returns None if the text doesn't look like a definite integral statement.
+    """
+    try:
+        from sympy import integrate, Symbol, simplify
+        from sympy.parsing.sympy_parser import (
+            parse_expr, standard_transformations,
+            implicit_multiplication_application,
+        )
+        T = standard_transformations + (implicit_multiplication_application,)
+
+        text = step_text.strip()
+
+        for pat in _INTEGRAL_PATTERNS:
+            m = pat.search(text)
+            if not m:
+                continue
+
+            lower_s, upper_s, integrand_s, claimed_s = m.groups()
+
+            # Clean each part
+            def p(s):
+                return parse_expr(_normalise(s.strip()), transformations=T)
+
+            x        = Symbol('x')
+            lower    = p(lower_s)
+            upper    = p(upper_s)
+            integrand = p(integrand_s)
+            claimed  = p(claimed_s)
+
+            actual = integrate(integrand, (x, lower, upper))
+            diff   = simplify(actual - claimed)
+
+            if diff == 0:
+                return CheckResult("correct", 0.97, None, "calculus")
+
+            return CheckResult(
+                "wrong", 0.94,
+                f"∫{lower}^{upper} {integrand} dx = {actual}, not {claimed}.",
+                "calculus", "arithmetic",
+            )
+
+        return None   # pattern not matched — pass to Groq
+
+    except Exception as exc:
+        logger.debug("SymPy integral check failed: %s", exc)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Groq / Llama fallback verifier
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -284,22 +359,26 @@ def _groq_check(problem_text: str, step_text: str, subject: str) -> CheckResult:
 # ─────────────────────────────────────────────────────────────────────────────
 def check_step(problem_statement: str, recognized_text: str) -> CheckResult:
     """
-    Main verification function called by the practice router.
-
-    Pipeline
-    ────────
-    1. Classify subject from combined text
-    2. Try SymPy (algebra/calculus) — instant, no API
-    3. Fall back to Claude for everything else (or if SymPy can't parse)
+    Verification pipeline:
+      1. Classify subject
+      2a. Calculus → try SymPy definite-integral check first (exact, no API)
+      2b. Algebra  → try SymPy equation check
+      3. Fall back to Groq/Llama for everything else
     """
     subject = classify_subject(recognized_text + " " + problem_statement)
+
+    if subject == "calculus":
+        result = _sympy_integral_check(recognized_text)
+        if result is not None:
+            logger.info("SymPy integral verdict=%s conf=%.2f", result.verdict, result.confidence)
+            return result
 
     if subject in ("algebra", "calculus"):
         result = _sympy_check(problem_statement, recognized_text)
         if result is not None:
-            logger.info("SymPy verdict=%s conf=%.2f", result.verdict, result.confidence)
+            logger.info("SymPy algebra verdict=%s conf=%.2f", result.verdict, result.confidence)
             return result
 
     result = _groq_check(problem_statement, recognized_text, subject)
-    logger.info("Claude verdict=%s conf=%.2f", result.verdict, result.confidence)
+    logger.info("Groq verdict=%s conf=%.2f", result.verdict, result.confidence)
     return result

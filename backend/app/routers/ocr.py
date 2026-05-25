@@ -32,13 +32,19 @@ Transcribe EXACTLY what is written. Rules:
     exponents    → x^2  (not x²)
     roots        → sqrt(x)
     fractions    → a/b
-    integrals    → integral(a, b, f(x)) or ∫_a^b f(x) dx
+    integrals    → ∫_a^b f(x) dx   (see CRITICAL note below)
     derivatives  → dy/dx or d/dx(f(x))
     limits       → lim(x→a) f(x)
-- Preserve symbols: + − × ÷ = ≠ ≤ ≥ → ∫ Σ π θ α β λ
+- Preserve symbols: + − × ÷ = ≠ ≤ ≥ → ∫ π θ α β λ
 - Multiple lines/steps → separate with newlines
 - If the canvas is blank or too faint to read → return exactly: [blank]
 - Do NOT add LaTeX delimiters like $ or \\( \\)
+
+CRITICAL — integral vs summation:
+- An elongated S-curve with a small number BELOW and a small number ABOVE is an INTEGRAL sign: ∫
+  Write it as ∫_a^b f(x) dx  (NEVER as Σ or "sum from")
+- Σ (sigma / summation) looks like a sideways M or zigzag E — very different from ∫
+- When in doubt and you see an S-shape with limits, treat it as ∫ (integral)
 """
 
 
