@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { fabric } from 'fabric'
-import { getPage, savePage, addPage, listPages, createSession, getRandomProblem, ocrImage, submitStep } from '../lib/api'
+import { getPage, savePage, addPage, listPages, ocrImage, verifyStep } from '../lib/api'
 import { useInkStrokes } from '../hooks/useInkStrokes'
 import { useStepBoundary } from '../hooks/useStepBoundary'
 
@@ -57,37 +57,24 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
   const [darkCanvas,  setDarkCanvas]  = useState(false)
   const [editingName, setEditingName] = useState(false)
 
-  // ── Phase 2/3: auto-verification state ───────────────────────────────────
-  const [sessionId,   setSessionId]   = useState(null)
-  const [stepIndex,   setStepIndex]   = useState(0)
+  // ── Verification state ───────────────────────────────────────────────────
   const [stepHistory, setStepHistory] = useState([])
   const [showSteps,   setShowSteps]   = useState(false)
   const [checking,    setChecking]    = useState(false)  // UI spinner only
   const [toast,       setToast]       = useState(null)   // auto-dismiss verdict
 
-  // Refs so handleStepReady can always read the latest values without being
-  // recreated (avoids stale-closure bug when sessionId arrives after mount)
-  const sessionIdRef  = useRef(null)
-  const stepIndexRef  = useRef(0)
-  const checkingRef   = useRef(false)   // real guard — state is too slow
-
-  useEffect(() => { sessionIdRef.current  = sessionId },  [sessionId])
-  useEffect(() => { stepIndexRef.current  = stepIndex },  [stepIndex])
+  const checkingRef = useRef(false)   // real guard — state update is async
 
   const { attach: attachInk, getStrokes, clearStrokes } = useInkStrokes()
 
   // Stable callback — no deps, reads everything through refs.
-  // This is intentional: the boundary hook captures it once at mount and it
-  // must never be stale.
+  // The boundary hook captures it once at mount; must never go stale.
   const handleStepReady = useCallback(async (_trigger) => {
-    if (checkingRef.current) return           // already running
+    if (checkingRef.current) return
     const canvas = fabricRef.current
     if (!canvas) return
     const strokes = getStrokes()
-    if (strokes.length === 0) return          // nothing drawn yet
-
-    const sid = sessionIdRef.current
-    if (!sid) return                          // session not ready yet
+    if (strokes.length === 0) return
 
     checkingRef.current = true
     setChecking(true)
@@ -100,24 +87,18 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
       try {
         const { text: t } = await ocrImage(dataUrl)
         text = t ?? ''
-      } catch { /* OCR failure — skip */ }
-      if (!text.trim()) return                // blank / unreadable
+      } catch { /* OCR failure — skip silently */ }
+      if (!text.trim()) return   // blank / unreadable
 
-      // 2. SymPy / Claude verification
-      const step = await submitStep(sid, {
-        session_id:      sid,
-        step_index:      stepIndexRef.current,
-        recognized_text: text,
-        strokes_json:    strokes.length ? JSON.stringify(strokes) : null,
-      })
+      // 2. Standalone verification (no problem context needed)
+      const result = await verifyStep(text)
 
-      // 3. Update history + reset stroke buffer
-      setStepHistory(prev => [...prev, step])
-      setStepIndex(i => i + 1)
+      // 3. Update history + clear stroke buffer
+      setStepHistory(prev => [...prev, result])
       clearStrokes()
 
       // 4. Auto-dismiss toast after 3.5 s
-      setToast(step)
+      setToast(result)
       setTimeout(() => setToast(null), 3500)
 
     } catch (err) {
@@ -126,7 +107,7 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
       checkingRef.current = false
       setChecking(false)
     }
-  }, [getStrokes, clearStrokes]) // ← intentionally minimal; values via refs
+  }, [getStrokes, clearStrokes])
 
   const { attachToCanvas: attachBoundary, triggerNow, resetBoundary } = useStepBoundary(handleStepReady)
 
@@ -212,20 +193,6 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
     historyRef.current = h.slice(0, idx + 1).concat(state)
     historyIdxRef.current = historyRef.current.length - 1
   }, [])
-
-  // ── Bootstrap a practice session (needed for step submission) ────────────
-  useEffect(() => {
-    async function startSession() {
-      try {
-        const problem = await getRandomProblem()
-        const session = await createSession(problem.id)
-        setSessionId(session.id)
-      } catch {
-        // no problems seeded — session stays null, submit still works via direct API
-      }
-    }
-    startSession()
-  }, [notebookId])
 
   // ── Tool / color / size → brush ───────────────────────────────────────────
   useEffect(() => {

@@ -37,4 +37,7 @@ export const deletePage = (notebookId, pageNum) => api.delete(`/notebooks/${note
 // ── OCR ───────────────────────────────────────────────────────────────────────
 export const ocrImage = (image_data) => api.post('/ocr/', { image_data }).then(r => r.data)
 
+// ── Verify (standalone step check — no session/problem needed) ────────────────
+export const verifyStep = (text) => api.post('/verify/', { text }).then(r => r.data)
+
 export default api

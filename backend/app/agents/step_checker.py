@@ -178,9 +178,11 @@ def _sympy_check(problem_text: str, step_text: str) -> Optional[CheckResult]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Claude fallback verifier
+# Groq / Llama fallback verifier
 # ─────────────────────────────────────────────────────────────────────────────
-_GROQ_PROMPT = """\
+
+# Used when we have a matching problem context
+_GROQ_PROMPT_WITH_CONTEXT = """\
 You are a strict but encouraging tutor grading a student's handwritten step.
 
 PROBLEM : {problem}
@@ -192,9 +194,29 @@ Reply with EXACTLY this JSON (no other text, no markdown fences):
 {{"verdict":"correct"|"wrong"|"needs_review","confidence":0.0-1.0,"hint":"one short sentence or null","error_type":"arithmetic"|"sign"|"algebra"|"conceptual"|"procedural"|null}}
 
 Rules
-- "correct"      → step is valid; hint must be null
-- "wrong"        → clear error; give a specific, encouraging hint
+- "correct"      → step is mathematically/scientifically valid for this problem; hint must be null
+- "wrong"        → clear error relevant to the problem; give a specific, encouraging hint
 - "needs_review" → ambiguous, incomplete, or you are not confident
+- error_type only when verdict is "wrong", otherwise null
+"""
+
+# Used when the step subject doesn't match the assigned problem (e.g. user
+# writes calculus in a notebook but the session has a physics problem)
+_GROQ_PROMPT_STANDALONE = """\
+You are checking whether a student's handwritten mathematical or scientific step is correct on its own.
+There is no specific problem to compare against — just verify the step itself.
+
+STUDENT WROTE : {step}
+SUBJECT       : {subject}
+
+Is this step mathematically/scientifically valid?
+Reply with EXACTLY this JSON (no other text, no markdown fences):
+{{"verdict":"correct"|"wrong"|"needs_review","confidence":0.0-1.0,"hint":"one short sentence or null","error_type":"arithmetic"|"sign"|"algebra"|"conceptual"|"procedural"|null}}
+
+Rules
+- "correct"      → the expression / equation is valid; hint must be null
+- "wrong"        → there is a clear error; give a brief specific hint
+- "needs_review" → expression is incomplete, ambiguous, or you are not sure
 - error_type only when verdict is "wrong", otherwise null
 """
 
@@ -213,17 +235,28 @@ def _groq_check(problem_text: str, step_text: str, subject: str) -> CheckResult:
 
     try:
         from groq import Groq
+
+        # Use context-aware prompt only when the problem is relevant to the
+        # subject being written — avoids comparing calculus against a physics
+        # problem just because the session was bootstrapped randomly.
+        problem_subject = classify_subject(problem_text) if problem_text.strip() else ""
+        subjects_match  = problem_subject == subject
+
+        if problem_text.strip() and subjects_match:
+            prompt = _GROQ_PROMPT_WITH_CONTEXT.format(
+                problem=problem_text, step=step_text, subject=subject,
+            )
+        else:
+            prompt = _GROQ_PROMPT_STANDALONE.format(
+                step=step_text, subject=subject,
+            )
+
         client = Groq(api_key=settings.groq_api_key)
         resp = client.chat.completions.create(
             model=_GROQ_MODEL,
             max_tokens=200,
-            temperature=0.1,   # low temp for consistent JSON output
-            messages=[{
-                "role": "user",
-                "content": _GROQ_PROMPT.format(
-                    problem=problem_text, step=step_text, subject=subject,
-                ),
-            }],
+            temperature=0.1,
+            messages=[{"role": "user", "content": prompt}],
         )
         raw = resp.choices[0].message.content.strip()
         # Strip accidental markdown fences if the model wraps it
