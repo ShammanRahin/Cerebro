@@ -180,7 +180,7 @@ def _sympy_check(problem_text: str, step_text: str) -> Optional[CheckResult]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Claude fallback verifier
 # ─────────────────────────────────────────────────────────────────────────────
-_CLAUDE_PROMPT = """\
+_GROQ_PROMPT = """\
 You are a strict but encouraging tutor grading a student's handwritten step.
 
 PROBLEM : {problem}
@@ -188,41 +188,48 @@ STUDENT : {step}
 SUBJECT : {subject}
 
 Decide if the step is correct, wrong, or needs human review.
-Reply with EXACTLY this JSON (no other text):
+Reply with EXACTLY this JSON (no other text, no markdown fences):
 {{"verdict":"correct"|"wrong"|"needs_review","confidence":0.0-1.0,"hint":"one short sentence or null","error_type":"arithmetic"|"sign"|"algebra"|"conceptual"|"procedural"|null}}
 
 Rules
-- "correct"       → step is valid; hint must be null
-- "wrong"         → clear error; give a specific, encouraging hint
-- "needs_review"  → ambiguous, incomplete, or you're not confident
+- "correct"      → step is valid; hint must be null
+- "wrong"        → clear error; give a specific, encouraging hint
+- "needs_review" → ambiguous, incomplete, or you are not confident
 - error_type only when verdict is "wrong", otherwise null
 """
 
+_GROQ_MODEL = "llama-3.3-70b-versatile"
 
-def _claude_check(problem_text: str, step_text: str, subject: str) -> CheckResult:
+
+def _groq_check(problem_text: str, step_text: str, subject: str) -> CheckResult:
     from app.config import settings
 
-    if not settings.anthropic_api_key:
+    if not settings.groq_api_key:
         return CheckResult(
             "needs_review", 0.50,
-            "AI check unavailable — add ANTHROPIC_API_KEY to backend/.env",
+            "AI check unavailable — add GROQ_API_KEY to backend/.env",
             subject,
         )
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        msg = client.messages.create(
-            model="claude-3-5-haiku-20241022",
+        from groq import Groq
+        client = Groq(api_key=settings.groq_api_key)
+        resp = client.chat.completions.create(
+            model=_GROQ_MODEL,
             max_tokens=200,
+            temperature=0.1,   # low temp for consistent JSON output
             messages=[{
                 "role": "user",
-                "content": _CLAUDE_PROMPT.format(
-                    problem=problem_text, step=step_text, subject=subject
+                "content": _GROQ_PROMPT.format(
+                    problem=problem_text, step=step_text, subject=subject,
                 ),
             }],
         )
-        raw = msg.content[0].text.strip()
+        raw = resp.choices[0].message.content.strip()
+        # Strip accidental markdown fences if the model wraps it
+        raw = raw.strip("` \n")
+        if raw.startswith("json"):
+            raw = raw[4:].strip()
         data = json.loads(raw)
         return CheckResult(
             verdict=data.get("verdict", "needs_review"),
@@ -232,10 +239,10 @@ def _claude_check(problem_text: str, step_text: str, subject: str) -> CheckResul
             error_type=data.get("error_type") or None,
         )
     except json.JSONDecodeError:
-        logger.warning("Claude returned non-JSON response")
+        logger.warning("Groq returned non-JSON: %s", raw)
         return CheckResult("needs_review", 0.40, None, subject)
     except Exception:
-        logger.exception("Claude verification failed")
+        logger.exception("Groq verification failed")
         return CheckResult("needs_review", 0.40, None, subject)
 
 
@@ -260,6 +267,6 @@ def check_step(problem_statement: str, recognized_text: str) -> CheckResult:
             logger.info("SymPy verdict=%s conf=%.2f", result.verdict, result.confidence)
             return result
 
-    result = _claude_check(problem_statement, recognized_text, subject)
+    result = _groq_check(problem_statement, recognized_text, subject)
     logger.info("Claude verdict=%s conf=%.2f", result.verdict, result.confidence)
     return result
