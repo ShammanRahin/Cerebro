@@ -1,46 +1,47 @@
 """
-OCR endpoint — powered by PaddleOCR 2.7 (runs locally, no API key needed).
+OCR endpoint — powered by Groq Llama 3.2 Vision (math-aware, no extra deps).
 
 POST /api/ocr/
   Body : { "image_data": "<data URL or raw base64 PNG>" }
   Reply: { "text": "...", "confidence": 0.0-1.0 }
 
-PaddleOCR 2.x result format:
-  result = ocr.ocr(img, cls=True)
-  → [ [ [bbox, (text, score)], ... ] ]   one outer list per image
+Why Groq Vision instead of PaddleOCR:
+  PaddleOCR is trained on printed text and completely misses mathematical
+  notation (∫ ∑ π ∂ etc.).  Llama 3.2 Vision understands math symbols,
+  integral signs, exponents, Greek letters, and multi-line expressions.
 """
 import base64
-import io
 import logging
-from functools import lru_cache
 
-import numpy as np
-from PIL import Image
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
-# ── Lazy-init: first call downloads ~100 MB model weights, ~5 s ──────────────
-@lru_cache(maxsize=1)
-def _get_ocr():
-    try:
-        from paddleocr import PaddleOCR  # noqa: PLC0415
-        return PaddleOCR(
-            use_angle_cls=True,   # auto-rotate skewed text lines
-            lang="en",
-            use_gpu=False,
-            show_log=False,
-        )
-    except ImportError as exc:
-        raise RuntimeError(
-            "PaddleOCR is not installed — run: pip install paddlepaddle paddleocr"
-        ) from exc
+_OCR_PROMPT = """\
+You are reading a student's handwritten math or science work drawn with a stylus on a digital tablet.
+
+Transcribe EXACTLY what is written. Rules:
+- Return ONLY the transcribed content — no explanations, no extra words
+- Preserve math notation:
+    exponents    → x^2  (not x²)
+    roots        → sqrt(x)
+    fractions    → a/b
+    integrals    → integral(a, b, f(x)) or ∫_a^b f(x) dx
+    derivatives  → dy/dx or d/dx(f(x))
+    limits       → lim(x→a) f(x)
+- Preserve symbols: + − × ÷ = ≠ ≤ ≥ → ∫ Σ π θ α β λ
+- Multiple lines/steps → separate with newlines
+- If the canvas is blank or too faint to read → return exactly: [blank]
+- Do NOT add LaTeX delimiters like $ or \\( \\)
+"""
 
 
-# ── Schemas ───────────────────────────────────────────────────────────────────
 class OcrRequest(BaseModel):
     image_data: str   # full data URL  OR  raw base64 PNG
 
@@ -50,51 +51,59 @@ class OcrResponse(BaseModel):
     confidence: float
 
 
-# ── Endpoint ──────────────────────────────────────────────────────────────────
 @router.post("/", response_model=OcrResponse)
 async def ocr_image(req: OcrRequest):
-    # 1. Strip data-URL prefix (data:image/png;base64,...)
+    if not settings.groq_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="GROQ_API_KEY not set — add it to backend/.env",
+        )
+
+    # Strip data-URL prefix if present
     raw = req.image_data
     if "," in raw:
         raw = raw.split(",", 1)[1]
 
-    # 2. Decode base64 → bytes
     try:
-        img_bytes = base64.b64decode(raw)
+        base64.b64decode(raw, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="image_data is not valid base64")
 
-    # 3. Bytes → PIL Image → numpy RGB array
     try:
-        pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        img_array = np.array(pil_img)
+        from groq import Groq
+        client = Groq(api_key=settings.groq_api_key)
+
+        resp = client.chat.completions.create(
+            model=_VISION_MODEL,
+            max_tokens=512,
+            temperature=0.1,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{raw}",
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": _OCR_PROMPT,
+                    },
+                ],
+            }],
+        )
+
+        text = resp.choices[0].message.content.strip()
+        if text == "[blank]":
+            text = ""
+
+        # Groq vision doesn't return a confidence score; use a fixed high value
+        # when text was found, 0 when blank
+        confidence = 0.88 if text else 0.0
+        logger.info("Vision OCR: %d chars", len(text))
+        return OcrResponse(text=text, confidence=confidence)
+
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Cannot decode image: {exc}")
-
-    # 4. Run PaddleOCR 2.x
-    try:
-        ocr = _get_ocr()
-        result = ocr.ocr(img_array, cls=True)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    except Exception as exc:
-        logger.exception("PaddleOCR inference failed")
-        raise HTTPException(status_code=500, detail=f"OCR engine error: {exc}")
-
-    # 5. Parse 2.x result: [ [ [bbox, (text, score)], ... ] ]
-    lines: list[str] = []
-    scores: list[float] = []
-
-    page = result[0] if result else []
-    if page:
-        for item in page:
-            text, score = item[1]
-            if text.strip():
-                lines.append(text.strip())
-                scores.append(float(score))
-
-    combined_text = "\n".join(lines)
-    avg_conf = float(np.mean(scores)) if scores else 0.0
-
-    logger.info("OCR: %d line(s), avg_conf=%.2f", len(lines), avg_conf)
-    return OcrResponse(text=combined_text, confidence=avg_conf)
+        logger.exception("Groq Vision OCR failed")
+        raise HTTPException(status_code=500, detail=f"OCR error: {exc}")
