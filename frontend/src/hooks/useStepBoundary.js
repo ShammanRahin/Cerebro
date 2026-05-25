@@ -3,15 +3,19 @@ import { useRef, useCallback, useEffect } from 'react'
 /**
  * Detects step boundaries two ways:
  *   1. Automatic — pen-up + PAUSE_MS of inactivity → onStepReady('auto')
- *   2. Manual    — two-finger touch on canvas → onStepReady('manual')
+ *   2. Manual    — two-finger touch OR Enter key → onStepReady('manual')
  *
- * Attach by calling attachToCanvas(fabricCanvas, canvasHTMLElement).
+ * The callback is stored in a ref so attachToCanvas is stable (called once)
+ * but always invokes the latest version of onStepReady.
  */
 const PAUSE_MS = 1500
 
 export function useStepBoundary(onStepReady) {
-  const timerRef = useRef(null)
-  const hasStrokesRef = useRef(false)
+  const timerRef       = useRef(null)
+  const hasStrokesRef  = useRef(false)
+  // Always-fresh reference — the listener closures read this, never onStepReady directly
+  const callbackRef    = useRef(onStepReady)
+  useEffect(() => { callbackRef.current = onStepReady }, [onStepReady])
 
   const cancelTimer = useCallback(() => {
     if (timerRef.current) {
@@ -25,53 +29,48 @@ export function useStepBoundary(onStepReady) {
     if (!hasStrokesRef.current) return
     timerRef.current = setTimeout(() => {
       timerRef.current = null
-      onStepReady('auto')
+      callbackRef.current?.('auto')   // always calls the latest handler
     }, PAUSE_MS)
-  }, [cancelTimer, onStepReady])
+  }, [cancelTimer])
 
   const triggerNow = useCallback(() => {
     cancelTimer()
     if (!hasStrokesRef.current) return
-    onStepReady('manual')
-  }, [cancelTimer, onStepReady])
+    callbackRef.current?.('manual')
+  }, [cancelTimer])
 
+  // Stable — safe to call once from canvas useEffect
   const attachToCanvas = useCallback((fabricCanvas, canvasEl) => {
     if (!fabricCanvas || !canvasEl) return () => {}
 
-    // Pen-up → start timer
-    const onUp = () => {
-      hasStrokesRef.current = true
-      scheduleCheck()
-    }
-    // Pen-down → cancel pending timer
+    const onUp   = () => { hasStrokesRef.current = true; scheduleCheck() }
     const onDown = () => cancelTimer()
 
-    fabricCanvas.on('mouse:up', onUp)
+    fabricCanvas.on('mouse:up',   onUp)
     fabricCanvas.on('mouse:down', onDown)
 
-    // Two-finger touch → immediate trigger
     const onTouchStart = (e) => {
       if (e.touches && e.touches.length === 2) {
         e.preventDefault()
-        triggerNow()
+        hasStrokesRef.current = true
+        callbackRef.current?.('manual')
       }
     }
     canvasEl.addEventListener('touchstart', onTouchStart, { passive: false })
 
     return () => {
-      fabricCanvas.off('mouse:up', onUp)
+      fabricCanvas.off('mouse:up',   onUp)
       fabricCanvas.off('mouse:down', onDown)
       canvasEl.removeEventListener('touchstart', onTouchStart)
       cancelTimer()
     }
-  }, [scheduleCheck, cancelTimer, triggerNow])
+  }, [scheduleCheck, cancelTimer]) // scheduleCheck/cancelTimer are stable
 
   const resetBoundary = useCallback(() => {
     cancelTimer()
     hasStrokesRef.current = false
   }, [cancelTimer])
 
-  // Cleanup on unmount
   useEffect(() => () => cancelTimer(), [cancelTimer])
 
   return { attachToCanvas, triggerNow, resetBoundary }

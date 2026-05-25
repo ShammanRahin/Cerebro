@@ -62,60 +62,73 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
   const [stepIndex,   setStepIndex]   = useState(0)
   const [stepHistory, setStepHistory] = useState([])
   const [showSteps,   setShowSteps]   = useState(false)
-  const [checking,    setChecking]    = useState(false)  // OCR+verify in flight
+  const [checking,    setChecking]    = useState(false)  // UI spinner only
   const [toast,       setToast]       = useState(null)   // auto-dismiss verdict
+
+  // Refs so handleStepReady can always read the latest values without being
+  // recreated (avoids stale-closure bug when sessionId arrives after mount)
+  const sessionIdRef  = useRef(null)
+  const stepIndexRef  = useRef(0)
+  const checkingRef   = useRef(false)   // real guard — state is too slow
+
+  useEffect(() => { sessionIdRef.current  = sessionId },  [sessionId])
+  useEffect(() => { stepIndexRef.current  = stepIndex },  [stepIndex])
 
   const { attach: attachInk, getStrokes, clearStrokes } = useInkStrokes()
 
-  // Fully automatic: snapshot → OCR → verify → toast (no user interaction)
+  // Stable callback — no deps, reads everything through refs.
+  // This is intentional: the boundary hook captures it once at mount and it
+  // must never be stale.
   const handleStepReady = useCallback(async (_trigger) => {
+    if (checkingRef.current) return           // already running
     const canvas = fabricRef.current
-    if (!canvas || checking) return
+    if (!canvas) return
     const strokes = getStrokes()
-    if (strokes.length === 0) return
+    if (strokes.length === 0) return          // nothing drawn yet
 
-    const dataUrl = canvas.toDataURL({ format: 'png', quality: 0.92, multiplier: 1.5 })
+    const sid = sessionIdRef.current
+    if (!sid) return                          // session not ready yet
+
+    checkingRef.current = true
     setChecking(true)
     setToast(null)
 
     try {
-      // 1. OCR
+      // 1. Snapshot → OCR
+      const dataUrl = canvas.toDataURL({ format: 'png', quality: 0.92, multiplier: 1.5 })
       let text = ''
       try {
         const { text: t } = await ocrImage(dataUrl)
         text = t ?? ''
-      } catch { /* OCR failed — skip silently */ }
+      } catch { /* OCR failure — skip */ }
+      if (!text.trim()) return                // blank / unreadable
 
-      if (!text.trim()) return   // blank canvas, nothing to verify
-
-      // 2. Backend verification (SymPy / Claude)
-      if (!sessionId) return
-      const step = await submitStep(sessionId, {
-        session_id:      sessionId,
-        step_index:      stepIndex,
+      // 2. SymPy / Claude verification
+      const step = await submitStep(sid, {
+        session_id:      sid,
+        step_index:      stepIndexRef.current,
         recognized_text: text,
         strokes_json:    strokes.length ? JSON.stringify(strokes) : null,
       })
 
-      // 3. Record result + clear stroke buffer
+      // 3. Update history + reset stroke buffer
       setStepHistory(prev => [...prev, step])
       setStepIndex(i => i + 1)
       clearStrokes()
-      resetBoundary()
 
-      // 4. Show toast for 3.5 s then auto-dismiss
+      // 4. Auto-dismiss toast after 3.5 s
       setToast(step)
       setTimeout(() => setToast(null), 3500)
 
     } catch (err) {
       console.error('Auto-check failed:', err)
     } finally {
+      checkingRef.current = false
       setChecking(false)
     }
-  }, [checking, getStrokes, sessionId, stepIndex, clearStrokes])
+  }, [getStrokes, clearStrokes]) // ← intentionally minimal; values via refs
 
   const { attachToCanvas: attachBoundary, triggerNow, resetBoundary } = useStepBoundary(handleStepReady)
-  // eslint-disable-next-line react-hooks/exhaustive-deps — resetBoundary stable ref
 
   // ── Canvas init ──────────────────────────────────────────────────────────────
   useEffect(() => {
