@@ -7,8 +7,13 @@ python-dotenv>=1.0.0
 groq>=0.11.0
 sympy>=1.12.0
 numpy>=1.26.4
+# torch>=2.4 is required by current sentence-transformers/transformers.
+# In Docker we install the CPU-only wheel separately to keep the image small.
+torch>=2.4.0
 sentence-transformers>=2.7.0
 structlog>=24.2.0
 python-multipart>=0.0.9
 aiofiles>=23.2.1
 Pillow>=10.0.0
+# MCP server — exposes the mistake graph to MCP clients (Claude Desktop, etc.)
+mcp[cli]>=1.27.0

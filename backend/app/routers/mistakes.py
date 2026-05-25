@@ -68,6 +68,85 @@ def get_stats_by_subject(db: Session = Depends(get_db)):
     ]
 
 
+@router.post("/backfill-embeddings")
+def backfill_embeddings(db: Session = Depends(get_db)):
+    """
+    Re-embed every mistake that was stored without a vector (e.g. saved while
+    the embedding model was unavailable). Lets old mistakes appear in the tree.
+    """
+    import json
+    from app.services.embeddings import embed
+
+    rows = (
+        db.query(models.Mistake)
+        .filter(models.Mistake.embedding_json.is_(None))
+        .all()
+    )
+
+    done, failed = 0, 0
+    for m in rows:
+        try:
+            m.embedding_json = json.dumps(embed(m.recognized_text))
+            done += 1
+        except Exception:
+            failed += 1
+    db.commit()
+    return {"backfilled": done, "failed": failed, "total": len(rows)}
+
+
+@router.get("/graph")
+def get_mistake_graph(threshold: float = 0.40, db: Session = Depends(get_db)):
+    """
+    Embedding similarity graph for the 'mistake tree' visualisation.
+
+    Nodes  = mistakes that have an embedding vector.
+    Edges  = pairs whose cosine similarity ≥ threshold (vectors are L2-normalised
+             so cosine == dot product).
+    """
+    import json
+
+    rows = (
+        db.query(models.Mistake)
+        .filter(models.Mistake.embedding_json.isnot(None))
+        .order_by(models.Mistake.created_at.desc())
+        .limit(200)
+        .all()
+    )
+
+    nodes, vecs = [], []
+    for m in rows:
+        try:
+            v = json.loads(m.embedding_json)
+        except Exception:
+            continue
+        vecs.append(v)
+        nodes.append({
+            "id": m.id,
+            "text": m.recognized_text,
+            "subject": m.subject,
+            "error_type": m.error_type,
+            "hint": m.misconception,
+            "correct_answer": m.correct_answer,
+            "resolved": m.resolved,
+        })
+
+    edges = []
+    n = len(vecs)
+    for i in range(n):
+        vi = vecs[i]
+        for j in range(i + 1, n):
+            vj = vecs[j]
+            sim = sum(a * b for a, b in zip(vi, vj))
+            if sim >= threshold:
+                edges.append({
+                    "source": nodes[i]["id"],
+                    "target": nodes[j]["id"],
+                    "weight": round(float(sim), 3),
+                })
+
+    return {"nodes": nodes, "edges": edges}
+
+
 @router.get("/{mistake_id}", response_model=schemas.MistakeResponse)
 def get_mistake(mistake_id: int, db: Session = Depends(get_db)):
     mistake = db.query(models.Mistake).filter(models.Mistake.id == mistake_id).first()

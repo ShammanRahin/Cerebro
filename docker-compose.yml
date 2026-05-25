@@ -1,25 +1,23 @@
-version: '3.9'
-
 services:
   backend:
     build: ./backend
+    env_file:
+      - ./backend/.env          # provides GROQ_API_KEY
+    environment:
+      - DATABASE_URL=sqlite:////data/cerebro.db   # persisted in the volume below
+    volumes:
+      - cerebro_data:/data                         # SQLite DB survives restarts
+      - hf_cache:/root/.cache/huggingface          # cache the embedding model
     ports:
       - "8000:8000"
-    volumes:
-      - ./backend:/app
-      - cerebro_data:/app/data
-    environment:
-      - DATABASE_URL=sqlite:///./data/cerebro.db
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
     build: ./frontend
+    depends_on:
+      - backend
     ports:
-      - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    command: npm run dev -- --host
+      - "5173:80"               # open http://localhost:5173
 
 volumes:
   cerebro_data:
+  hf_cache:

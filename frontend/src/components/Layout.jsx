@@ -2,7 +2,6 @@ import { Outlet, NavLink } from 'react-router-dom'
 
 const NAV = [
   { to: '/',          label: 'Notebooks', icon: '📓', exact: true },
-  { to: '/practice',  label: 'Practice',  icon: '✏️' },
   { to: '/dashboard', label: 'Dashboard', icon: '📊' },
   { to: '/mistakes',  label: 'Mistakes',  icon: '🔍' },
   { to: '/settings',  label: 'Settings',  icon: '⚙️' },

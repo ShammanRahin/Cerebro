@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { getNotebook } from '../lib/api'
 import CanvasEditor from '../components/CanvasEditor'
 
 export default function NotebookPage() {
   const { id } = useParams()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const initialPage = Math.max(1, parseInt(searchParams.get('page') || '1', 10) || 1)
   const [notebook, setNotebook] = useState(null)
 
   useEffect(() => {
@@ -24,6 +26,7 @@ export default function NotebookPage() {
     <CanvasEditor
       notebookId={notebook.id}
       notebookName={notebook.name}
+      initialPage={initialPage}
       onBack={() => navigate('/')}
     />
   )

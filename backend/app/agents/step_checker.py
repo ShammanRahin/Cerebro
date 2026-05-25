@@ -20,27 +20,33 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
 class CheckResult:
-    verdict: str           # "correct" | "wrong" | "needs_review"
-    confidence: float      # 0.0 – 1.0
-    hint: Optional[str]    # short coaching note; None when correct
-    subject: str           # detected subject
-    error_type: Optional[str] = None   # algebra | arithmetic | sign | conceptual | …
+    verdict: str                        # "correct" | "wrong" | "needs_review"
+    confidence: float                   # 0.0 – 1.0
+    hint: Optional[str]                 # what's wrong (None when correct)
+    subject: str                        # detected subject
+    error_type: Optional[str] = None    # algebra | arithmetic | sign | conceptual | …
+    correct_answer: Optional[str] = None  # the right answer (shown on demand)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Subject classifier  (pure regex, no API)
 # ─────────────────────────────────────────────────────────────────────────────
+# ∫/∂ are Unicode — can't use \b around them; list them separately
 _CALCULUS = re.compile(
-    r'\b(integral|derivative|d/d[a-z]|lim\b|∫|limit|antiderivative|'
+    r'∫|∂|'
+    r'\b(?:integral|derivative|d/d[a-z]|lim(?:\b|it)|antiderivative|'
     r'converge|diverge|series|taylor|maclaurin)\b', re.I)
 # Chemical formulas must be case-SENSITIVE (H2O ≠ h2o; re.I would match "Solve" as a formula)
 _CHEM_FORMULA = re.compile(r'(?:[A-Z][a-z]?\d*){2,}')
 _CHEM_KEYWORDS = re.compile(
-    r'→|⇌|\bmol(e)?\b|\breaction\b|\bacid\b|\bbase\b|pH'
+    r'→|⇌|\bmol(e)?\b|\breaction\b|\bacid\b|\bbase\b|\bpH\b'
     r'|\boxidation\b|\breduction\b|\btitrat', re.I)
 _BIOLOGY = re.compile(
     r'\b(cell|dna|rna|protein|enzyme|meiosis|mitosis|chromosome|'
-    r'photosynthesis|respiration|atp|organism|species|gene|allele)\b', re.I)
+    r'photosynthesis|respiration|atp|organism|species|gene|allele|'
+    r'mitochondria|mitochondrion|nucleus|nucleolus|ribosome|chloroplast|'
+    r'membrane|cytoplasm|organelle|tissue|bacteria|virus|evolution|'
+    r'hormone|neuron|antibody|chlorophyll|osmosis|diffusion)\b', re.I)
 _PHYSICS = re.compile(
     r'\b(force|velocity|acceleration|momentum|energy|joule|newton|watt|'
     r'torque|friction|gravity|F\s*=\s*ma|E\s*=\s*mc)\b', re.I)
@@ -155,18 +161,21 @@ def _sympy_check(problem_text: str, step_text: str) -> Optional[CheckResult]:
                 return CheckResult("correct", 0.95, None, "algebra")
 
             if s_set and p_set and s_set.isdisjoint(p_set):
+                correct = f"{var} = {', '.join(sorted(p_set))}"
                 return CheckResult(
                     "wrong", 0.92,
-                    f"Got {var} = {', '.join(sorted(s_set))} but the correct answer is "
-                    f"{var} = {', '.join(sorted(p_set))}.",
+                    f"Got {var} = {', '.join(sorted(s_set))} — check your algebra steps.",
                     "algebra", "algebra",
+                    correct_answer=correct,
                 )
 
             if p_set and not s_set:
+                correct = f"{var} = {', '.join(sorted(p_set))}"
                 return CheckResult(
                     "wrong", 0.85,
-                    f"This step has no solution, but the problem does.",
+                    f"This step has no solution — the equation may have been simplified incorrectly.",
                     "algebra", "algebra",
+                    correct_answer=correct,
                 )
 
         # ── step is parseable but no problem to compare against ─────────
@@ -241,8 +250,9 @@ def _sympy_integral_check(step_text: str) -> Optional[CheckResult]:
 
             return CheckResult(
                 "wrong", 0.94,
-                f"∫{lower}^{upper} {integrand} dx = {actual}, not {claimed}.",
+                f"∫{lower}^{upper} {integrand} dx ≠ {claimed}. Try evaluating the antiderivative at the bounds.",
                 "calculus", "arithmetic",
+                correct_answer=str(actual),
             )
 
         return None   # pattern not matched — pass to Groq
@@ -263,42 +273,45 @@ You are a strict but encouraging tutor grading a student's handwritten step.
 PROBLEM : {problem}
 STUDENT : {step}
 SUBJECT : {subject}
-
+{past_mistakes}
 Decide if the step is correct, wrong, or needs human review.
 Reply with EXACTLY this JSON (no other text, no markdown fences):
-{{"verdict":"correct"|"wrong"|"needs_review","confidence":0.0-1.0,"hint":"one short sentence or null","error_type":"arithmetic"|"sign"|"algebra"|"conceptual"|"procedural"|null}}
+{{"verdict":"correct"|"wrong"|"needs_review","confidence":0.0-1.0,"hint":"one short sentence or null","error_type":"arithmetic"|"sign"|"algebra"|"conceptual"|"procedural"|null,"correct_answer":"the correct value/expression or null"}}
 
 Rules
-- "correct"      → step is mathematically/scientifically valid for this problem; hint must be null
-- "wrong"        → clear error relevant to the problem; give a specific, encouraging hint
-- "needs_review" → ambiguous, incomplete, or you are not confident
-- error_type only when verdict is "wrong", otherwise null
+- "correct"      → step is mathematically/scientifically valid for this problem; hint and correct_answer must be null
+- "wrong"        → clear error relevant to the problem; give a specific hint personalised to past mistakes if any; set correct_answer to the right value (e.g. "x = 3" or "6 mol")
+- "needs_review" → ambiguous, incomplete, or you are not confident; correct_answer should be null
+- error_type and correct_answer only when verdict is "wrong", otherwise null
 """
 
-# Used when the step subject doesn't match the assigned problem (e.g. user
-# writes calculus in a notebook but the session has a physics problem)
 _GROQ_PROMPT_STANDALONE = """\
 You are checking whether a student's handwritten mathematical or scientific step is correct on its own.
 There is no specific problem to compare against — just verify the step itself.
 
 STUDENT WROTE : {step}
 SUBJECT       : {subject}
-
+{past_mistakes}
 Is this step mathematically/scientifically valid?
 Reply with EXACTLY this JSON (no other text, no markdown fences):
-{{"verdict":"correct"|"wrong"|"needs_review","confidence":0.0-1.0,"hint":"one short sentence or null","error_type":"arithmetic"|"sign"|"algebra"|"conceptual"|"procedural"|null}}
+{{"verdict":"correct"|"wrong"|"needs_review","confidence":0.0-1.0,"hint":"one short sentence or null","error_type":"arithmetic"|"sign"|"algebra"|"conceptual"|"procedural"|null,"correct_answer":"the correct value/expression or null"}}
 
 Rules
-- "correct"      → the expression / equation is valid; hint must be null
-- "wrong"        → there is a clear error; give a brief specific hint
-- "needs_review" → expression is incomplete, ambiguous, or you are not sure
-- error_type only when verdict is "wrong", otherwise null
+- "correct"      → the expression / equation is valid; hint and correct_answer must be null
+- "wrong"        → there is a clear error; give a brief hint personalised to past mistakes if any; set correct_answer to the right value
+- "needs_review" → expression is incomplete, ambiguous, or you are not sure; correct_answer should be null
+- error_type and correct_answer only when verdict is "wrong", otherwise null
 """
 
 _GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
-def _groq_check(problem_text: str, step_text: str, subject: str) -> CheckResult:
+def _groq_check(
+    problem_text: str,
+    step_text: str,
+    subject: str,
+    similar_mistakes=None,
+) -> CheckResult:
     from app.config import settings
 
     if not settings.groq_api_key:
@@ -311,6 +324,21 @@ def _groq_check(problem_text: str, step_text: str, subject: str) -> CheckResult:
     try:
         from groq import Groq
 
+        # Build past-mistakes RAG context block
+        past_mistakes = ""
+        if similar_mistakes:
+            lines = []
+            for m in similar_mistakes:
+                line = f'  • "{m.recognized_text}"'
+                if m.misconception:
+                    line += f" → {m.misconception}"
+                lines.append(line)
+            past_mistakes = (
+                "STUDENT'S PAST SIMILAR MISTAKES (use to personalise the hint):\n"
+                + "\n".join(lines)
+                + "\n"
+            )
+
         # Use context-aware prompt only when the problem is relevant to the
         # subject being written — avoids comparing calculus against a physics
         # problem just because the session was bootstrapped randomly.
@@ -320,16 +348,18 @@ def _groq_check(problem_text: str, step_text: str, subject: str) -> CheckResult:
         if problem_text.strip() and subjects_match:
             prompt = _GROQ_PROMPT_WITH_CONTEXT.format(
                 problem=problem_text, step=step_text, subject=subject,
+                past_mistakes=past_mistakes,
             )
         else:
             prompt = _GROQ_PROMPT_STANDALONE.format(
                 step=step_text, subject=subject,
+                past_mistakes=past_mistakes,
             )
 
         client = Groq(api_key=settings.groq_api_key)
         resp = client.chat.completions.create(
             model=_GROQ_MODEL,
-            max_tokens=200,
+            max_tokens=300,
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -345,6 +375,7 @@ def _groq_check(problem_text: str, step_text: str, subject: str) -> CheckResult:
             hint=data.get("hint") or None,
             subject=subject,
             error_type=data.get("error_type") or None,
+            correct_answer=data.get("correct_answer") or None,
         )
     except json.JSONDecodeError:
         logger.warning("Groq returned non-JSON: %s", raw)
@@ -357,13 +388,18 @@ def _groq_check(problem_text: str, step_text: str, subject: str) -> CheckResult:
 # ─────────────────────────────────────────────────────────────────────────────
 # Public entry point
 # ─────────────────────────────────────────────────────────────────────────────
-def check_step(problem_statement: str, recognized_text: str) -> CheckResult:
+def check_step(
+    problem_statement: str,
+    recognized_text: str,
+    similar_mistakes=None,
+) -> CheckResult:
     """
     Verification pipeline:
       1. Classify subject
       2a. Calculus → try SymPy definite-integral check first (exact, no API)
       2b. Algebra  → try SymPy equation check
       3. Fall back to Groq/Llama for everything else
+         (similar_mistakes injected as RAG context into the Groq prompt)
     """
     subject = classify_subject(recognized_text + " " + problem_statement)
 
@@ -379,6 +415,6 @@ def check_step(problem_statement: str, recognized_text: str) -> CheckResult:
             logger.info("SymPy algebra verdict=%s conf=%.2f", result.verdict, result.confidence)
             return result
 
-    result = _groq_check(problem_statement, recognized_text, subject)
+    result = _groq_check(problem_statement, recognized_text, subject, similar_mistakes=similar_mistakes)
     logger.info("Groq verdict=%s conf=%.2f", result.verdict, result.confidence)
     return result

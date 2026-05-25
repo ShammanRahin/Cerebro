@@ -53,6 +53,7 @@ class MistakeCreate(BaseModel):
     subject: str
     error_type: Optional[str] = None
     misconception: Optional[str] = None
+    correct_answer: Optional[str] = None
     confidence: Optional[float] = None
     strokes_json: Optional[str] = None
     embedding: Optional[List[float]] = None
@@ -65,7 +66,10 @@ class MistakeResponse(BaseModel):
     recognized_text: str
     subject: str
     error_type: Optional[str] = None
-    misconception: Optional[str] = None
+    misconception: Optional[str] = None   # hint
+    correct_answer: Optional[str] = None
+    notebook_id: Optional[int] = None
+    page_number: Optional[int] = None
     confidence: Optional[float] = None
     resolved: bool
     created_at: datetime

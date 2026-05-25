@@ -40,7 +40,10 @@ class Mistake(Base):
     recognized_text = Column(Text, nullable=False)
     subject = Column(String, nullable=False, index=True)
     error_type = Column(String, nullable=True, index=True)
-    misconception = Column(Text, nullable=True)
+    misconception = Column(Text, nullable=True)   # hint shown to student
+    correct_answer = Column(Text, nullable=True)  # the right answer
+    notebook_id = Column(Integer, nullable=True)  # where the mistake was made
+    page_number = Column(Integer, nullable=True)
     embedding_json = Column(Text, nullable=True)
     confidence = Column(Float, nullable=True)
     resolved = Column(Boolean, default=False, index=True)

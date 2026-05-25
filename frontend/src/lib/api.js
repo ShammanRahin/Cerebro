@@ -11,6 +11,8 @@ export const getMistake = (id) => api.get(`/mistakes/${id}`).then(r => r.data)
 export const resolveMistake = (id) => api.post(`/mistakes/${id}/resolve`).then(r => r.data)
 export const getWeakConcepts = () => api.get('/mistakes/stats/weak-concepts').then(r => r.data)
 export const getStatsBySubject = () => api.get('/mistakes/stats/by-subject').then(r => r.data)
+export const getMistakeGraph = (threshold) => api.get('/mistakes/graph', { params: threshold != null ? { threshold } : {} }).then(r => r.data)
+export const backfillEmbeddings = () => api.post('/mistakes/backfill-embeddings').then(r => r.data)
 
 // ── Practice ──────────────────────────────────────────────────────────────────
 export const getProblems = (subject) => api.get('/practice/problems', { params: subject ? { subject } : {} }).then(r => r.data)
@@ -38,6 +40,10 @@ export const deletePage = (notebookId, pageNum) => api.delete(`/notebooks/${note
 export const ocrImage = (image_data) => api.post('/ocr/', { image_data }).then(r => r.data)
 
 // ── Verify (standalone step check — no session/problem needed) ────────────────
-export const verifyStep = (text) => api.post('/verify/', { text }).then(r => r.data)
+export const verifyStep = (text, notebook_id = null, page_number = null) =>
+  api.post('/verify/', { text, notebook_id, page_number }).then(r => r.data)
+
+// ── Note Coach (improve class notes — no grading) ─────────────────────────────
+export const suggestNote = (text) => api.post('/notes/suggest', { text }).then(r => r.data)
 
 export default api

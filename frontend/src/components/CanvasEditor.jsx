@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { fabric } from 'fabric'
-import { getPage, savePage, addPage, listPages, ocrImage, verifyStep } from '../lib/api'
+import { getPage, savePage, addPage, listPages, ocrImage, verifyStep, suggestNote } from '../lib/api'
 import { useInkStrokes } from '../hooks/useInkStrokes'
 import { useStepBoundary } from '../hooks/useStepBoundary'
 
@@ -33,8 +33,23 @@ function makePressureBrush(canvas, baseWidth, color) {
   return brush
 }
 
+// Bounding box of a set of ink strokes ([{points:[{x,y}]}]). null when empty.
+function strokeBBox(strokes) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const s of strokes || []) {
+    for (const p of s.points || []) {
+      if (p.x < minX) minX = p.x
+      if (p.y < minY) minY = p.y
+      if (p.x > maxX) maxX = p.x
+      if (p.y > maxY) maxY = p.y
+    }
+  }
+  if (minX === Infinity) return null
+  return { minX, minY, maxX, maxY }
+}
+
 // ── CanvasEditor ───────────────────────────────────────────────────────────────
-export default function CanvasEditor({ notebookId, notebookName, onBack }) {
+export default function CanvasEditor({ notebookId, notebookName, onBack, initialPage = 1 }) {
   const containerRef = useRef(null)
   const canvasElRef  = useRef(null)
   const fabricRef    = useRef(null)
@@ -47,7 +62,7 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
   const [tool,        setTool]        = useState(TOOL.PEN)
   const [color,       setColor]       = useState(PALETTE[0].hex)
   const [sizeKey,     setSizeKey]     = useState('S')
-  const [currentPage, setCurrentPage] = useState(1)
+  const [currentPage, setCurrentPage] = useState(initialPage)
   const [totalPages,  setTotalPages]  = useState(1)
   const [saving,      setSaving]      = useState(false)
   const [saved,       setSaved]       = useState(false)
@@ -57,13 +72,20 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
   const [darkCanvas,  setDarkCanvas]  = useState(false)
   const [editingName, setEditingName] = useState(false)
 
-  // ── Verification state ───────────────────────────────────────────────────
-  const [stepHistory, setStepHistory] = useState([])
-  const [showSteps,   setShowSteps]   = useState(false)
-  const [checking,    setChecking]    = useState(false)  // UI spinner only
-  const [toast,       setToast]       = useState(null)   // auto-dismiss verdict
+  // ── Verification / Note-coach state ──────────────────────────────────────
+  const [mode,           setMode]           = useState('note')  // 'note' | 'practice'
+  const [stepHistory,    setStepHistory]    = useState([])
+  const [showSteps,      setShowSteps]      = useState(false)
+  const [checking,       setChecking]       = useState(false)  // UI spinner only
+  const [toast,          setToast]          = useState(null)   // practice verdict (auto-dismiss)
+  const [noteCard,       setNoteCard]       = useState(null)   // note suggestion (persists)
+  const [revealedSteps,  setRevealedSteps]  = useState({})    // index → bool for answer reveal
 
   const checkingRef = useRef(false)   // real guard — state update is async
+  const modeRef     = useRef('note')  // read inside the stable boundary callback
+  useEffect(() => { modeRef.current = mode }, [mode])
+  const currentPageRef = useRef(initialPage)   // so verify can tag the mistake's page
+  useEffect(() => { currentPageRef.current = currentPage }, [currentPage])
 
   const { attach: attachInk, getStrokes, clearStrokes } = useInkStrokes()
 
@@ -90,16 +112,21 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
       } catch { /* OCR failure — skip silently */ }
       if (!text.trim()) return   // blank / unreadable
 
-      // 2. Standalone verification (no problem context needed)
-      const result = await verifyStep(text)
-
-      // 3. Update history + clear stroke buffer
-      setStepHistory(prev => [...prev, result])
-      clearStrokes()
-
-      // 4. Auto-dismiss toast after 3.5 s
-      setToast(result)
-      setTimeout(() => setToast(null), 3500)
+      if (modeRef.current === 'note') {
+        // ── Note mode: improve the note (mistake-graph aware) ──────────────
+        const result = await suggestNote(text)
+        // Capture the stroke bounding box now so "Add to page" can place text
+        const bbox = strokeBBox(getStrokes())
+        clearStrokes()
+        setNoteCard({ ...result, source: text, bbox })   // persists until acted on
+      } else {
+        // ── Practice mode: verify the step (existing behaviour) ────────────
+        const result = await verifyStep(text, notebookId, currentPageRef.current)
+        setStepHistory(prev => [...prev, result])
+        clearStrokes()
+        setToast(result)
+        setTimeout(() => setToast(null), 3500)
+      }
 
     } catch (err) {
       console.error('Auto-check failed:', err)
@@ -344,6 +371,29 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
     pushHistory()
   }, [darkCanvas, pushHistory])
 
+  // Stamp the current note suggestion onto the canvas, just below the writing
+  const addNoteToPage = useCallback(() => {
+    const canvas = fabricRef.current
+    if (!canvas || !noteCard) return
+    const b = noteCard.bbox
+    const left  = b ? b.minX : 60
+    const top   = b ? b.maxY + 18 : 60
+    const width = Math.max(220, b ? (b.maxX - b.minX) : 320)
+    const text = new fabric.Textbox(noteCard.suggestion, {
+      left, top, width,
+      fontSize: 18,
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontStyle: 'italic',
+      fill: noteCard.has_error ? '#dc2626' : '#6c63ff',
+      editable: true,
+    })
+    canvas.add(text)
+    canvas.renderAll()
+    isDirtyRef.current = true
+    pushHistory()
+    setNoteCard(null)
+  }, [noteCard, pushHistory])
+
   // ── Page nav ──────────────────────────────────────────────────────────────
   const goToPage = async (num) => {
     if (num === currentPage) return
@@ -522,17 +572,38 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
           ↓
         </button>
 
-        {/* Check step — manual trigger */}
+        {/* Mode toggle — Note coach vs Practice verify */}
+        <div className={`flex items-center rounded-xl p-1 gap-0.5 ${darkCanvas ? 'bg-gray-700' : 'bg-gray-100'}`}>
+          {[
+            { m: 'note',     icon: '📝', label: 'Note' },
+            { m: 'practice', icon: '✎',  label: 'Practice' },
+          ].map(({ m, icon, label }) => (
+            <button
+              key={m}
+              title={m === 'note'
+                ? 'Note mode — AI improves your notes'
+                : 'Practice mode — AI checks your steps'}
+              onClick={() => { setMode(m); setToast(null); setNoteCard(null) }}
+              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                mode === m
+                  ? 'bg-cerebro-accent text-white shadow-sm'
+                  : darkCanvas ? 'text-gray-300 hover:bg-gray-600' : 'text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              <span>{icon}</span> {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Manual trigger — label adapts to mode */}
         <button
-          title="Check step (Enter / two-finger tap)"
+          title={mode === 'note'
+            ? 'Suggest a note (Enter / two-finger tap)'
+            : 'Check step (Enter / two-finger tap)'}
           onClick={triggerNow}
-          className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium border transition-colors ${
-            darkCanvas
-              ? 'border-cerebro-accent/40 text-cerebro-accent hover:bg-cerebro-accent/10'
-              : 'border-cerebro-accent/40 text-cerebro-accent hover:bg-cerebro-accent/10'
-          }`}
+          className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium border border-cerebro-accent/40 text-cerebro-accent hover:bg-cerebro-accent/10 transition-colors"
         >
-          ✦ Check step
+          {mode === 'note' ? '✦ Suggest note' : '✦ Check step'}
         </button>
 
         {/* Save */}
@@ -547,21 +618,23 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
           {saving ? 'Saving…' : saved ? '✓ Saved' : '↑ Save'}
         </button>
 
-        {/* Steps history toggle */}
-        <button
-          onClick={() => setShowSteps(v => !v)}
-          title="Step history"
-          className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold transition-colors ${
-            showSteps ? 'bg-cerebro-accent text-white' : darkCanvas ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-600 hover:bg-gray-100'
-          }`}
-        >
-          ✓
-          {stepHistory.length > 0 && (
-            <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-cerebro-accent text-white text-[9px] flex items-center justify-center font-bold">
-              {stepHistory.length}
-            </span>
-          )}
-        </button>
+        {/* Steps history toggle — practice mode only */}
+        {mode === 'practice' && (
+          <button
+            onClick={() => setShowSteps(v => !v)}
+            title="Step history"
+            className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold transition-colors ${
+              showSteps ? 'bg-cerebro-accent text-white' : darkCanvas ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            ✓
+            {stepHistory.length > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-cerebro-accent text-white text-[9px] flex items-center justify-center font-bold">
+                {stepHistory.length}
+              </span>
+            )}
+          </button>
+        )}
 
         {/* Pages toggle */}
         <button
@@ -630,7 +703,7 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
               darkCanvas ? 'bg-gray-800/90 text-gray-300 border border-gray-700' : 'bg-white/90 text-gray-600 border border-gray-200'
             } backdrop-blur`}>
               <span className="w-2 h-2 rounded-full bg-cerebro-accent animate-pulse" />
-              Checking your work…
+              {mode === 'note' ? 'Improving your notes…' : 'Checking your work…'}
             </div>
           )}
 
@@ -642,7 +715,7 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
               needs_review: { bg: 'bg-amber-500/15 border-amber-500/30', icon: '~', text: 'text-amber-400', label: 'Review'  },
             }[toast.verdict] ?? { bg: 'bg-gray-500/15 border-gray-500/30', icon: '?', text: 'text-gray-400', label: 'Unknown' }
             return (
-              <div className={`absolute bottom-16 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1 px-5 py-3 rounded-2xl border shadow-xl pointer-events-none z-20 backdrop-blur min-w-48 max-w-xs text-center ${cfg.bg}`}>
+              <div className={`absolute bottom-16 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 px-5 py-3 rounded-2xl border shadow-xl z-20 backdrop-blur min-w-52 max-w-sm text-center pointer-events-auto ${cfg.bg}`}>
                 <div className="flex items-center gap-2">
                   <span className={`text-lg font-bold ${cfg.text}`}>{cfg.icon}</span>
                   <span className={`text-sm font-semibold ${cfg.text}`}>{cfg.label}</span>
@@ -658,12 +731,68 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
                     💡 {toast.hint}
                   </p>
                 )}
+                {toast.verdict === 'wrong' && toast.correct_answer && (
+                  <details className="text-xs w-full">
+                    <summary className={`cursor-pointer select-none font-medium ${cfg.text} hover:opacity-80`}>
+                      See answer →
+                    </summary>
+                    <p className={`mt-1 font-mono font-semibold ${cfg.text}`}>{toast.correct_answer}</p>
+                  </details>
+                )}
+              </div>
+            )
+          })()}
+
+          {/* Note-coach suggestion card — persists until acted on */}
+          {noteCard && !checking && (() => {
+            const TYPE = {
+              complete: { icon: '✎', label: 'Complete',  text: 'text-blue-400' },
+              add_fact: { icon: '✦', label: 'Key fact',  text: 'text-cerebro-accent' },
+              clarify:  { icon: '↻', label: 'Clarify',   text: 'text-amber-400' },
+              fix:      { icon: '✗', label: 'Fix',       text: 'text-red-400' },
+            }[noteCard.type] ?? { icon: '💡', label: 'Suggestion', text: 'text-cerebro-accent' }
+            return (
+              <div className={`absolute bottom-16 left-1/2 -translate-x-1/2 flex flex-col gap-2 px-5 py-3 rounded-2xl border shadow-xl z-20 backdrop-blur min-w-64 max-w-sm pointer-events-auto ${
+                darkCanvas ? 'bg-gray-800/95 border-gray-700' : 'bg-white/95 border-gray-200'
+              }`}>
+                <div className="flex items-center gap-2">
+                  <span className={`text-base font-bold ${TYPE.text}`}>{TYPE.icon}</span>
+                  <span className={`text-sm font-semibold ${TYPE.text}`}>{TYPE.label}</span>
+                  {noteCard.related_count > 0 && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-cerebro-accent/15 text-cerebro-accent font-medium">
+                      ↺ from a past mistake
+                    </span>
+                  )}
+                  <button
+                    onClick={() => setNoteCard(null)}
+                    className={`ml-auto text-xs ${darkCanvas ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}`}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p className={`text-sm leading-relaxed ${darkCanvas ? 'text-gray-200' : 'text-gray-800'}`}>
+                  {noteCard.suggestion}
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={addNoteToPage}
+                    className="flex-1 text-xs font-medium px-3 py-1.5 rounded-lg bg-cerebro-accent text-white hover:opacity-90 transition-opacity"
+                  >
+                    ➕ Add to page
+                  </button>
+                  <button
+                    onClick={() => setNoteCard(null)}
+                    className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${darkCanvas ? 'text-gray-300 hover:bg-gray-700' : 'text-gray-500 hover:bg-gray-100'}`}
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
             )
           })()}
 
           {/* Verdict dots — one per submitted step, top-right corner */}
-          {stepHistory.length > 0 && (
+          {mode === 'practice' && stepHistory.length > 0 && (
             <div className="absolute top-3 right-3 flex flex-col gap-1 pointer-events-none">
               {stepHistory.slice(-8).map((s, i) => {
                 const col = s.verdict === 'correct' ? 'bg-green-500' : s.verdict === 'wrong' ? 'bg-red-500' : 'bg-amber-500'
@@ -694,7 +823,7 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
         </div>
 
         {/* Step history side panel */}
-        {showSteps && (
+        {mode === 'practice' && showSteps && (
           <div className={`w-64 flex-shrink-0 flex flex-col border-l overflow-y-auto ${darkCanvas ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
             <div className={`px-3 py-3 border-b flex items-center justify-between ${darkCanvas ? 'border-gray-700' : 'border-gray-100'}`}>
               <span className={`text-xs font-semibold uppercase tracking-wide ${darkCanvas ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -714,8 +843,9 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
             ) : (
               <div className="flex-1 p-2 space-y-2">
                 {stepHistory.map((step, i) => {
-                  const dot = step.verdict === 'correct' ? 'bg-green-500' : step.verdict === 'wrong' ? 'bg-red-500' : 'bg-amber-500'
-                  const label = step.verdict === 'correct' ? 'text-green-500' : step.verdict === 'wrong' ? 'text-red-400' : 'text-amber-400'
+                  const dot   = step.verdict === 'correct' ? 'bg-green-500'  : step.verdict === 'wrong' ? 'bg-red-500'  : 'bg-amber-500'
+                  const label = step.verdict === 'correct' ? 'text-green-500': step.verdict === 'wrong' ? 'text-red-400': 'text-amber-400'
+                  const revealed = !!revealedSteps[i]
                   return (
                     <div key={step.id ?? i} className={`rounded-lg p-2.5 border ${darkCanvas ? 'bg-gray-700/50 border-gray-600' : 'bg-gray-50 border-gray-100'}`}>
                       <div className="flex items-center gap-1.5 mb-1">
@@ -730,6 +860,21 @@ export default function CanvasEditor({ notebookId, notebookName, onBack }) {
                         <p className={`text-xs mt-1.5 italic ${darkCanvas ? 'text-gray-400' : 'text-gray-500'}`}>
                           💡 {step.hint}
                         </p>
+                      )}
+                      {step.verdict === 'wrong' && step.correct_answer && (
+                        <div className="mt-2">
+                          <button
+                            onClick={() => setRevealedSteps(prev => ({ ...prev, [i]: !prev[i] }))}
+                            className={`text-xs font-medium ${label} hover:opacity-70 transition-opacity`}
+                          >
+                            {revealed ? '▲ Hide answer' : '▼ See answer'}
+                          </button>
+                          {revealed && (
+                            <p className={`mt-1 text-xs font-mono font-semibold px-2 py-1 rounded ${darkCanvas ? 'bg-gray-800 text-red-300' : 'bg-red-50 text-red-600'}`}>
+                              {step.correct_answer}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
                   )

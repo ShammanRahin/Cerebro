@@ -1,10 +1,17 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis,
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Legend
 } from 'recharts'
 import { getWeakConcepts, getStatsBySubject, getMistakes } from '../lib/api'
+
+// Open the notebook page where a mistake was made (falls back to the notebook list)
+function mistakeHref(m) {
+  if (!m.notebook_id) return '/'
+  return `/notebook/${m.notebook_id}?page=${m.page_number || 1}`
+}
 
 const SUBJECT_LABELS = {
   math_algebra: 'Algebra',
@@ -29,6 +36,7 @@ function StatCard({ label, value, sub }) {
 }
 
 export default function Dashboard() {
+  const navigate = useNavigate()
   const [weakConcepts, setWeakConcepts] = useState([])
   const [subjectStats, setSubjectStats] = useState([])
   const [recentMistakes, setRecentMistakes] = useState([])
@@ -142,7 +150,13 @@ export default function Dashboard() {
                 {m.resolved ? (
                   <span className="badge-correct">resolved</span>
                 ) : (
-                  <span className="badge-wrong">open</span>
+                  <button
+                    onClick={() => navigate(mistakeHref(m))}
+                    title={m.notebook_id ? 'Open in notebook' : 'Go to notebooks'}
+                    className="badge-wrong cursor-pointer hover:opacity-80 transition-opacity"
+                  >
+                    open ↗
+                  </button>
                 )}
               </div>
             ))}

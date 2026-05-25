@@ -66,20 +66,14 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* OCR language (placeholder) */}
+      {/* OCR language */}
       <div className="card mb-6 opacity-60">
         <h2 className="text-sm font-semibold text-white mb-1">OCR language</h2>
-        <p className="text-xs text-gray-500 mb-3">Available after Phase 2 (canvas + ML Kit).</p>
+        <p className="text-xs text-gray-500 mb-3">More languages coming soon.</p>
         <select disabled className="bg-cerebro-bg border border-cerebro-border text-sm text-gray-400 rounded-lg px-3 py-2 cursor-not-allowed">
           <option>English (default)</option>
           <option>Bengali (planned)</option>
         </select>
-      </div>
-
-      {/* MCP server toggle (placeholder) */}
-      <div className="card opacity-60">
-        <h2 className="text-sm font-semibold text-white mb-1">MCP server</h2>
-        <p className="text-xs text-gray-500">Available after Phase 7 (Mistake Graph MCP).</p>
       </div>
     </div>
   )
